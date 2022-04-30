@@ -7,5 +7,6 @@ Communication between main computer and [Bobik robot](https://github.com/slesing
 TODO
 pomaly wifi ping
 bluetooth na intel 7260, https://elinux.org/Jetson/Bluetooth
+install opencv
 install cuda tools, https://elinux.org/Jetson/Installing_CUDA
 kinect, https://elinux.org/Jetson/Cameras
