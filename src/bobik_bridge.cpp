@@ -5,10 +5,10 @@
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp/serialization.hpp>
 #include "geometry_msgs/msg/twist.hpp"
+#include "sensor_msgs/msg/laser_scan.hpp"
 #include "bobik_bridge.hpp"
 #include "protocol_types.h"
 
-#include <geometry_msgs/msg/twist.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <tf2/LinearMath/Quaternion.h>
 
@@ -70,7 +70,7 @@ void BobikBridge::zmq_read_thread_func(const std::shared_future<void> &local_fut
         }
         else
         {
-            RCLCPP_INFO(rclcpp::get_logger("bobik_bridge"), "topic: %s, data: %s, size: %d\n", zmq_msg_group(&receiveMessage), (char *)zmq_msg_data(&receiveMessage), bytesReceived);
+            RCLCPP_INFO(rclcpp::get_logger("bobik_bridge"), "topic: %s, size: %d", zmq_msg_group(&receiveMessage), bytesReceived);
             if (strcmp(zmq_msg_group(&receiveMessage), TOPIC_CASTER_RAW) == 0)
             {
                 void *data_buffer = zmq_msg_data(&receiveMessage);
@@ -91,6 +91,19 @@ void BobikBridge::zmq_read_thread_func(const std::shared_future<void> &local_fut
                 message.data = data;
                 pub_raw_caster->publish(message);
                 pub_odom->publish(calculate_odom(&data));
+            }
+            else if (strcmp(zmq_msg_group(&receiveMessage), TOPIC_LIDAR_RANGES) == 0)
+            {
+                RCLCPP_INFO(rclcpp::get_logger("bobik_bridge"), "TOPIC_LIDAR_RANGES: %d", bytesReceived);
+                void *data_buffer = zmq_msg_data(&receiveMessage);
+                sensor_msgs::msg::LaserScan::SharedPtr msg_scan = std::make_shared<sensor_msgs::msg::LaserScan>();
+                msg_scan->time_increment = 0.1;
+                msg_scan->intensities.resize(360);
+                msg_scan->ranges.resize(360);
+            }
+            else if (strcmp(zmq_msg_group(&receiveMessage), TOPIC_LIDAR_INTENSITIES) == 0)
+            {
+                RCLCPP_INFO(rclcpp::get_logger("bobik_bridge"), "intensities");
             }
         }
 
@@ -227,7 +240,7 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    if (zmq_connect(radio, "udp://127.0.0.1:7654") != 0)
+    if (zmq_connect(radio, "udp://192.168.1.21:7654") != 0)
     {
         RCLCPP_ERROR(rclcpp::get_logger("bobik_bridge"), "zmq_connect: %s", zmq_strerror(errno));
         return EXIT_FAILURE;

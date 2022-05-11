@@ -17,6 +17,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
 
 add_executable(bobik_bridge src/bobik_bridge.cpp)
 
@@ -31,6 +32,7 @@ ament_target_dependencies(
   nav_msgs
   tf2
   tf2_geometry_msgs
+  sensor_msgs
 )
 
 install(TARGETS
