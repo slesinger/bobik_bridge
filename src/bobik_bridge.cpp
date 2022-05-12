@@ -25,8 +25,10 @@ BobikBridge::BobikBridge() : rclcpp::Node("bobik_bridge")
         TOPIC_CMD_VEL, 10, std::bind(&BobikBridge::cmd_vel_torobot, this, _1));
     pub_raw_caster = this->create_publisher<std_msgs::msg::Int16MultiArray>("driver/raw/caster", 10);
     pub_odom = this->create_publisher<nav_msgs::msg::Odometry>("odom", 10);
+    pub_scan = this->create_publisher<sensor_msgs::msg::LaserScan>("scan", 10);
 
     zmq_read_thread_ = std::thread(&BobikBridge::zmq_read_thread_func, this, future_);
+    RCLCPP_INFO(rclcpp::get_logger("bobik_bridge"), "BobikBridge instance created");
 }
 
 void BobikBridge::send_to_zmq_topic(const char *topic, uint8_t *data, size_t size) const
@@ -70,7 +72,7 @@ void BobikBridge::zmq_read_thread_func(const std::shared_future<void> &local_fut
         }
         else
         {
-            RCLCPP_INFO(rclcpp::get_logger("bobik_bridge"), "topic: %s, size: %d", zmq_msg_group(&receiveMessage), bytesReceived);
+            // RCLCPP_INFO(rclcpp::get_logger("bobik_bridge"), "topic: %s, size: %d", zmq_msg_group(&receiveMessage), bytesReceived);
             if (strcmp(zmq_msg_group(&receiveMessage), TOPIC_CASTER_RAW) == 0)
             {
                 void *data_buffer = zmq_msg_data(&receiveMessage);
@@ -94,16 +96,29 @@ void BobikBridge::zmq_read_thread_func(const std::shared_future<void> &local_fut
             }
             else if (strcmp(zmq_msg_group(&receiveMessage), TOPIC_LIDAR_RANGES) == 0)
             {
-                RCLCPP_INFO(rclcpp::get_logger("bobik_bridge"), "TOPIC_LIDAR_RANGES: %d", bytesReceived);
+                if (bytesReceived != sizeof(LaserScan_t))
+                {
+                    RCLCPP_ERROR(rclcpp::get_logger("bobik_bridge"), "Invalid message size of LaserScan_t {}", bytesReceived);
+                    continue;
+                }
+                // RCLCPP_INFO(rclcpp::get_logger("bobik_bridge"), "TOPIC_LIDAR_RANGES: %d", sizeof(LaserScan_t));
                 void *data_buffer = zmq_msg_data(&receiveMessage);
+                LaserScan_t *lidar_ranges = (LaserScan_t *)data_buffer;
                 sensor_msgs::msg::LaserScan::SharedPtr msg_scan = std::make_shared<sensor_msgs::msg::LaserScan>();
-                msg_scan->time_increment = 0.1;
-                msg_scan->intensities.resize(360);
+                msg_scan->header.frame_id = "lidar_link";
+                msg_scan->header.stamp = rclcpp::Clock().now();
+                msg_scan->angle_min = 0.0;
+                msg_scan->angle_max = 2.0 * M_PI;
+                msg_scan->angle_increment = (2.0 * M_PI / 360.0);
+                msg_scan->range_min = 0.06;
+                msg_scan->range_max = 5.0;
+                msg_scan->time_increment = lidar_ranges->time_increment / 1e8;
                 msg_scan->ranges.resize(360);
-            }
-            else if (strcmp(zmq_msg_group(&receiveMessage), TOPIC_LIDAR_INTENSITIES) == 0)
-            {
-                RCLCPP_INFO(rclcpp::get_logger("bobik_bridge"), "intensities");
+                for (int i = 0; i < 360; i++)
+                {
+                    msg_scan->ranges[i] = (float)(lidar_ranges->data[i]) / 1000.0;
+                }
+                pub_scan->publish(*msg_scan);
             }
         }
 
@@ -253,6 +268,11 @@ int main(int argc, char *argv[])
     if (zmq_join(dish, TOPIC_CASTER_RAW) != 0)
     {
         RCLCPP_ERROR(rclcpp::get_logger("bobik_bridge"), "Could not subscribe to: %s", TOPIC_CASTER_RAW);
+        return EXIT_FAILURE;
+    }
+    if (zmq_join(dish, TOPIC_LIDAR_RANGES) != 0)
+    {
+        RCLCPP_ERROR(rclcpp::get_logger("bobik_bridge"), "Could not subscribe to: %s", TOPIC_LIDAR_RANGES);
         return EXIT_FAILURE;
     }
 

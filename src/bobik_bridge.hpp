@@ -27,6 +27,7 @@ private:
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr sub_cmd_vel;
     rclcpp::Publisher<std_msgs::msg::Int16MultiArray>::SharedPtr pub_raw_caster;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom;
+    rclcpp::Publisher<sensor_msgs::msg::LaserScan>::SharedPtr pub_scan;
 };
 
 #endif
