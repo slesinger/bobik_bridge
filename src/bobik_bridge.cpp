@@ -130,7 +130,7 @@ void BobikBridge::zmq_read_thread_func(const std::shared_future<void> &local_fut
 
 void BobikBridge::cmd_vel_torobot(const geometry_msgs::msg::Twist::SharedPtr msg) const
 {
-    RCLCPP_INFO(this->get_logger(), "From ROS2 /cmd_vel: '%s'", "msg->data.c_str()");
+    //RCLCPP_INFO(this->get_logger(), "From ROS2 /cmd_vel: '%s'", "msg->data.c_str()");
 
     geometry_msgs::msg::Vector3 linear = msg->linear;
     geometry_msgs::msg::Vector3 angular = msg->angular;
