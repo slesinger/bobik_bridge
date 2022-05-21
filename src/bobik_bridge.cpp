@@ -6,6 +6,7 @@
 #include <rclcpp/serialization.hpp>
 #include "geometry_msgs/msg/twist.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
+#include "sensor_msgs/msg/joint_state.hpp"
 #include "bobik_bridge.hpp"
 #include "protocol_types.h"
 
@@ -17,6 +18,24 @@ using std::placeholders::_1;
 void *radio;
 void *dish;
 zmq_msg_t zmq_msg;
+geometry_msgs::msg::Pose odom_pose;
+
+// These defines are owned by bobik_arduino. This is just a dumb copy.
+#define LEN_AB 0.457 // distance between twa caster axis
+#define LEN_AB_HALF LEN_AB / 2.0
+#define LEN_Cc LEN_AB * 1.7320508075688772935 / 2.0 // height of same-side triangle, distance between point C and center of line c (AB)
+#define LEN_SC 2.0 / 3.0 * LEN_Cc      // distance between robot center (S - stred) and rear caster axis C
+#define LEN_Sc 1.0 / 3.0 * LEN_Cc      // distance between robot center (S - stred) and center of line c (AB)
+#define POS_A_x LEN_Sc
+#define POS_A_y -LEN_AB_HALF
+#define POS_B_x LEN_Sc
+#define POS_B_y LEN_AB_HALF
+#define POS_C_x -LEN_SC
+#define POS_C_y 0.0
+#define CASTER_UNITS2RAD M_PI / -8192.0
+#define REAL_WORLD_COEF 1.077  // coeficient adjusting for real world measurements
+#define CASTER_TICKS_PER_REVOLUTION (2 * 120)
+#define CASTER_TICKS2METERS (0.123 * M_PI) / CASTER_TICKS_PER_REVOLUTION  * REAL_WORLD_COEF
 
 BobikBridge::BobikBridge() : rclcpp::Node("bobik_bridge")
 {
@@ -24,8 +43,12 @@ BobikBridge::BobikBridge() : rclcpp::Node("bobik_bridge")
     sub_cmd_vel = this->create_subscription<geometry_msgs::msg::Twist>(
         TOPIC_CMD_VEL, 10, std::bind(&BobikBridge::cmd_vel_torobot, this, _1));
     pub_raw_caster = this->create_publisher<std_msgs::msg::Int16MultiArray>("driver/raw/caster", 10);
+    pub_joint_states = this->create_publisher<sensor_msgs::msg::JointState>("joint_states", 10);
     pub_odom = this->create_publisher<nav_msgs::msg::Odometry>("odom", 10);
     pub_scan = this->create_publisher<sensor_msgs::msg::LaserScan>("scan", 10);
+    fl_caster_wheel_joint = 0;
+    fr_caster_wheel_joint = 0;
+    r_caster_wheel_joint = 0;
 
     zmq_read_thread_ = std::thread(&BobikBridge::zmq_read_thread_func, this, future_);
     RCLCPP_INFO(rclcpp::get_logger("bobik_bridge"), "BobikBridge instance created");
@@ -84,6 +107,7 @@ void BobikBridge::zmq_read_thread_func(const std::shared_future<void> &local_fut
                     msg->fr_caster_drive_joint,
                     msg->r_caster_rotation_joint,
                     msg->r_caster_drive_joint};
+
                 auto message = std_msgs::msg::Int16MultiArray();
                 message.layout.dim.push_back(std_msgs::msg::MultiArrayDimension());
                 message.layout.dim[0].label = "rot";
@@ -91,8 +115,33 @@ void BobikBridge::zmq_read_thread_func(const std::shared_future<void> &local_fut
                 message.layout.dim[0].stride = 1;
                 message.layout.data_offset = 0;
                 message.data = data;
+
+                auto msg_base_joint_states = sensor_msgs::msg::JointState();
+                msg_base_joint_states.header.stamp = rclcpp::Clock().now();
+                msg_base_joint_states.name.push_back("fl_caster_rotation_joint");
+                msg_base_joint_states.name.push_back("fl_caster_wheel_joint");
+                msg_base_joint_states.name.push_back("fr_caster_rotation_joint");
+                msg_base_joint_states.name.push_back("fr_caster_wheel_joint");
+                msg_base_joint_states.name.push_back("r_caster_rotation_joint");
+                msg_base_joint_states.name.push_back("r_caster_wheel_joint");
+                fl_caster_wheel_joint += msg->fl_caster_drive_joint;
+                fr_caster_wheel_joint += msg->fr_caster_drive_joint;
+                r_caster_wheel_joint += msg->r_caster_drive_joint;
+                // fl_caster_wheel_joint %= CASTER_TICKS_PER_REVOLUTION;
+                // fr_caster_wheel_joint %= CASTER_TICKS_PER_REVOLUTION;
+                // r_caster_wheel_joint %= CASTER_TICKS_PER_REVOLUTION;
+                msg_base_joint_states.position.push_back(msg->fl_caster_rotation_joint * CASTER_UNITS2RAD);
+                msg_base_joint_states.position.push_back(2.0 * M_PI * fl_caster_wheel_joint / CASTER_TICKS_PER_REVOLUTION);
+                msg_base_joint_states.position.push_back(msg->fr_caster_rotation_joint * CASTER_UNITS2RAD);
+                msg_base_joint_states.position.push_back(2.0 * M_PI * fr_caster_wheel_joint / CASTER_TICKS_PER_REVOLUTION);
+                msg_base_joint_states.position.push_back(msg->r_caster_rotation_joint * CASTER_UNITS2RAD);
+                msg_base_joint_states.position.push_back(2.0 * M_PI * r_caster_wheel_joint / CASTER_TICKS_PER_REVOLUTION);
+                
                 pub_raw_caster->publish(message);
+                pub_joint_states->publish(msg_base_joint_states);
                 pub_odom->publish(calculate_odom(&data));
+                // RCLCPP_INFO(this->get_logger(), "Caster rotation %d : %d : %d", msg->fl_caster_rotation_joint, msg->fr_caster_rotation_joint, msg->r_caster_rotation_joint);
+                // RCLCPP_INFO(this->get_logger(), "Caster drive %d : %d : %d", msg->fl_caster_drive_joint, msg->fr_caster_drive_joint, msg->r_caster_drive_joint);
             }
             else if (strcmp(zmq_msg_group(&receiveMessage), TOPIC_LIDAR_RANGES) == 0)
             {
@@ -130,56 +179,19 @@ void BobikBridge::zmq_read_thread_func(const std::shared_future<void> &local_fut
 
 void BobikBridge::cmd_vel_torobot(const geometry_msgs::msg::Twist::SharedPtr msg) const
 {
-    //RCLCPP_INFO(this->get_logger(), "From ROS2 /cmd_vel: '%s'", "msg->data.c_str()");
-
     geometry_msgs::msg::Vector3 linear = msg->linear;
     geometry_msgs::msg::Vector3 angular = msg->angular;
     MsgCmdVel_t msg_cmd_vel;
     msg_cmd_vel.linear_x = (int16_t)(linear.x * FLOAT_INT16_PRECISION);
-    msg_cmd_vel.linear_y = (int16_t)(linear.y * FLOAT_INT16_PRECISION);
+    msg_cmd_vel.linear_y = (int16_t)(-linear.y * FLOAT_INT16_PRECISION); // inverting Y axis to match REP-103
     msg_cmd_vel.rotation = (int16_t)(angular.z * FLOAT_INT16_PRECISION);
+    uint8_t *x = (uint8_t *)(&msg_cmd_vel);
+    RCLCPP_INFO(this->get_logger(), "From ROS2 /cmd_vel: '%02X:%02X:%02X:%02X:%02X:%02X'", x[0], x[1], x[2], x[3], x[4], x[5]);
     send_to_zmq_topic(TOPIC_CMD_VEL, (uint8_t *)(&msg_cmd_vel), 6);
-}
-
-void BobikBridge::caster_raw_fromrobot(const void *data_buffer) const
-{
-    RCLCPP_INFO(this->get_logger(), "From ZMQ /caster_raw_joint_states: '%s'", "msg->data.c_str()");
-    MsgCasterJointStates_t *msg = (struct MsgCasterJointStates_t *)data_buffer;
-    std::vector<int16_t> data = {
-        msg->fl_caster_rotation_joint,
-        msg->fl_caster_drive_joint,
-        msg->fr_caster_rotation_joint,
-        msg->fr_caster_drive_joint,
-        msg->r_caster_rotation_joint,
-        msg->r_caster_drive_joint};
-    auto message = std_msgs::msg::Int16MultiArray();
-    message.layout.dim.push_back(std_msgs::msg::MultiArrayDimension());
-    message.layout.dim[0].label = "rot";
-    message.layout.dim[0].size = data.size();
-    message.layout.dim[0].stride = 1;
-    message.layout.data_offset = 0;
-    message.data = data;
-    pub_raw_caster->publish(message);
-    pub_odom->publish(calculate_odom(&data));
-    // RCLCPP_INFO(this->get_logger(), "Caster rotation %d : %d : %d", msg->fl_caster_rotation_joint, msg->fr_caster_rotation_joint, msg->r_caster_rotation_joint);
 }
 
 nav_msgs::msg::Odometry BobikBridge::calculate_odom(std::vector<int16_t> *data) const
 {
-#define LEN_AB 0.457 // distance between twa caster axis
-#define LEN_AB_HALF LEN_AB / 2.0
-#define LEN_Cc LEN_AB * 1.732051 / 2.0 // height of same-side triangle, distance between point C and center of line c (AB)
-#define LEN_SC 2.0 / 3.0 * LEN_Cc      // distance between robot center (S - stred) and rear caster axis C
-#define LEN_Sc 1.0 / 3.0 * LEN_Cc      // distance between robot center (S - stred) and center of line c (AB)
-#define POS_A_x LEN_Sc
-#define POS_A_y -LEN_AB_HALF
-#define POS_B_x LEN_Sc
-#define POS_B_y LEN_AB_HALF
-#define POS_C_x -LEN_SC
-#define POS_C_y 0.0
-#define CASTER_UNITS2RAD M_PI / -8192.0
-#define CASTER_TICKS2METERS (0.123 * M_PI) / (2 * 120)
-
     MsgCasterJointStates_t *caster_data = (struct MsgCasterJointStates_t *)data->data();
     // Front Left caster new position
     float Arad = CASTER_UNITS2RAD * caster_data->fl_caster_rotation_joint;
@@ -204,14 +216,13 @@ nav_msgs::msg::Odometry BobikBridge::calculate_odom(std::vector<int16_t> *data) 
     float c_center_to_rear_y = Cy - c_center_y;
     // New base center position
     float base_center_x = c_center_x + c_center_to_rear_x / 3.0;
-    float base_center_y = c_center_y + c_center_to_rear_y / 3.0;
+    float base_center_y = -(c_center_y + c_center_to_rear_y / 3.0);
     // New base vector forward
     float base_forward_x = -c_center_to_rear_x;
-    float base_forward_y = -c_center_to_rear_y;
+    float base_forward_y = -c_center_to_rear_y;  // inverting Y axis to match REP-103
     // Rotation of base in radians
     float base_rotation = atan2(base_forward_y, base_forward_x); // assumption: base cannot rotate more than 90 degrees with one frame
 
-    geometry_msgs::msg::Pose odom_pose;
     odom_pose.position.x += base_center_x;
     odom_pose.position.y += base_center_y;
     odom_pose.position.z = 0;

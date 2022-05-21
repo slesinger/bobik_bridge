@@ -26,8 +26,17 @@ private:
     nav_msgs::msg::Odometry calculate_odom(std::vector<int16_t> *data) const;
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr sub_cmd_vel;
     rclcpp::Publisher<std_msgs::msg::Int16MultiArray>::SharedPtr pub_raw_caster;
+    rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr pub_joint_states;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom;
     rclcpp::Publisher<sensor_msgs::msg::LaserScan>::SharedPtr pub_scan;
+
+    /**
+     * @brief Keep track of drive ticks to accumulate
+     * 
+     */
+    int fl_caster_wheel_joint;
+    int fr_caster_wheel_joint;
+    int r_caster_wheel_joint;
 };
 
 #endif
