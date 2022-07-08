@@ -29,6 +29,7 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr pub_joint_states;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom;
     rclcpp::Publisher<sensor_msgs::msg::LaserScan>::SharedPtr pub_scan;
+    rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr pub_imu;
 
     /**
      * @brief Keep track of drive ticks to accumulate
