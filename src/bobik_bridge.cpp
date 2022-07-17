@@ -29,7 +29,7 @@ int16_t raw_r = 0;
 
 #define DEG2RAD M_PI / 180.0
 #define G2MS2 9.80665 / 16384
-
+#define A_TRIANGLE_SIDE 0.53
 // These defines are owned by bobik_arduino. This is just a dumb copy.
 #define LEN_AB 0.457 // distance between twa caster axis
 #define LEN_AB_HALF LEN_AB / 2.0
@@ -94,7 +94,6 @@ void BobikBridge::send_to_zmq_topic(const char *topic, uint8_t *data, size_t siz
 void BobikBridge::zmq_read_thread_func(const std::shared_future<void> &local_future)
 {
     std::future_status status;
-
     do
     {
         int bytesReceived;
@@ -198,7 +197,7 @@ void BobikBridge::zmq_read_thread_func(const std::shared_future<void> &local_fut
             }
             else if (strcmp(zmq_msg_group(&receiveMessage), TOPIC_IMU9DOF) == 0)
             {
-                https://www.ros.org/reps/rep-0145.html
+                // https://www.ros.org/reps/rep-0145.html
                 void *data_buffer = zmq_msg_data(&receiveMessage);
                 MsgIMU9DOF_t *imu_data = (MsgIMU9DOF_t *)data_buffer;
                 geometry_msgs::msg::Quaternion imu_orientation;
