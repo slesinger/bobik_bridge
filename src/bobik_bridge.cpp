@@ -8,13 +8,16 @@
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "sensor_msgs/msg/imu.hpp"
+#include "sensor_msgs/msg/magnetic_field.hpp"
 #include "bobik_bridge.hpp"
 #include "protocol_types.h"
+#include <boost/assign/list_of.hpp>
 
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <tf2/LinearMath/Quaternion.h>
 
 using std::placeholders::_1;
+using namespace boost::assign;
 
 void *radio;
 void *dish;
@@ -23,10 +26,19 @@ float odom_pose_x;
 float odom_pose_y;
 float odom_pose_gamma;
 
+#define CALIBRATION_FRAMES 100  // how many frames since robot start will be used to calculate bias
+#define IMU_STEADY_ACC_TRESHOLD 0.02 //IMU values below this treshold will be reported as 0 to decrease drift
+unsigned int calibration_cnt = 0;
+double imu_acc_bias_x_accum = 0;
+double imu_acc_bias_y_accum = 0;
+double imu_acc_bias_x = 0;
+double imu_acc_bias_y = 0;
+
 int16_t raw_fl = 0;
 int16_t raw_fr = 0;
 int16_t raw_r = 0;
 
+#define MSG_TRANSPORT_DELAY_MS 50 // how many milliseconds sooner an event happened before it reached this Bobik Bridge, to compensate
 #define DEG2RAD M_PI / 180.0
 #define G2MS2 9.80665 / 16384
 #define A_TRIANGLE_SIDE 0.53
@@ -59,6 +71,7 @@ BobikBridge::BobikBridge() : rclcpp::Node("bobik_bridge")
     pub_odom = this->create_publisher<nav_msgs::msg::Odometry>("odom", 10);
     pub_scan = this->create_publisher<sensor_msgs::msg::LaserScan>("scan", 10);
     pub_imu = this->create_publisher<sensor_msgs::msg::Imu>("imu", 10);
+    // pub_mag = this->create_publisher<sensor_msgs::msg::MagneticField>("magnetic_field", 10);
     fl_caster_wheel_joint = 0;
     fr_caster_wheel_joint = 0;
     r_caster_wheel_joint = 0;
@@ -198,13 +211,24 @@ void BobikBridge::zmq_read_thread_func(const std::shared_future<void> &local_fut
             else if (strcmp(zmq_msg_group(&receiveMessage), TOPIC_IMU9DOF) == 0)
             {
                 // https://www.ros.org/reps/rep-0145.html
+                // EKF filter takes roll/pitch even when disabled in ekf.yaml. Hardcoding 0 here.
                 void *data_buffer = zmq_msg_data(&receiveMessage);
                 MsgIMU9DOF_t *imu_data = (MsgIMU9DOF_t *)data_buffer;
+                tf2::Quaternion from_q(
+                    (double)imu_data->qx / FLOAT_INT16_PRECISION,
+                    (double)imu_data->qy / FLOAT_INT16_PRECISION,
+                    (double)imu_data->qz / FLOAT_INT16_PRECISION,
+                    (double)imu_data->qw / FLOAT_INT16_PRECISION);
+                tf2::Matrix3x3 m(from_q);
+                double roll, pitch, yaw;
+                m.getRPY(roll, pitch, yaw);
+                tf2::Quaternion to_q;
+                to_q.setRPY( 0, 0, yaw );
                 geometry_msgs::msg::Quaternion imu_orientation;
-                imu_orientation.w = (double)imu_data->qw / FLOAT_INT16_PRECISION;
-                imu_orientation.x = (double)imu_data->qx / FLOAT_INT16_PRECISION;
-                imu_orientation.y = (double)imu_data->qy / FLOAT_INT16_PRECISION;
-                imu_orientation.z = (double)imu_data->qz / FLOAT_INT16_PRECISION;
+                imu_orientation.w = to_q.getW();
+                imu_orientation.x = 0.0;
+                imu_orientation.y = 0.0;
+                imu_orientation.z = 0.0; //to_q.getZ();
 
                 // °/sec > rad/sec
                 geometry_msgs::msg::Vector3 imu_angular_velocity;
@@ -212,19 +236,66 @@ void BobikBridge::zmq_read_thread_func(const std::shared_future<void> &local_fut
                 imu_angular_velocity.y = (double)imu_data->gy * DEG2RAD;
                 imu_angular_velocity.z = (double)imu_data->gz * DEG2RAD;
 
-                // LSB*g > m/s^2
+                // LSB*g (1g = 9.80665 m/s^2)> m/s^2
                 geometry_msgs::msg::Vector3 imu_linear_acceleration;
-                imu_linear_acceleration.x = (double)imu_data->ax * G2MS2;
-                imu_linear_acceleration.y = (double)imu_data->ay * G2MS2;
-                imu_linear_acceleration.z = (double)imu_data->az * G2MS2;
+                #define ACC_CALIB_X 1.0
+                #define ACC_CALIB_Y ACC_CALIB_X
+                imu_linear_acceleration.x = -(double)imu_data->ax * G2MS2 - imu_acc_bias_x;
+                //+y left    -y right
+                imu_linear_acceleration.y = (double)imu_data->ay * G2MS2 - imu_acc_bias_y;  //the lower the more right it drifts
+                imu_linear_acceleration.z = (double)imu_data->az * G2MS2 * 1.894;
+                if (calibration_cnt < CALIBRATION_FRAMES)  // count to calibration?
+                {
+                    imu_acc_bias_x_accum += imu_linear_acceleration.x;
+                    imu_acc_bias_y_accum += imu_linear_acceleration.y;
+                    calibration_cnt++;
+                }
+                if (calibration_cnt == CALIBRATION_FRAMES)
+                {
+                    imu_acc_bias_x = imu_acc_bias_x_accum / calibration_cnt;
+                    imu_acc_bias_y = imu_acc_bias_y_accum / calibration_cnt;
+                    imu_linear_acceleration.x = 0.0;
+                    imu_linear_acceleration.y = 0.0;
+                    calibration_cnt++;  // do not exec calibration again
+                    RCLCPP_INFO(this->get_logger(), "IMU calibration bias: x %.2f , y %.2f", imu_acc_bias_x, imu_acc_bias_y);
+                }
+                if (abs(imu_linear_acceleration.x) < IMU_STEADY_ACC_TRESHOLD) imu_linear_acceleration.x = 0.0;
+                if (abs(imu_linear_acceleration.y) < IMU_STEADY_ACC_TRESHOLD) imu_linear_acceleration.y = 0.0;
+                imu_linear_acceleration.x *= ACC_CALIB_X;
+                imu_linear_acceleration.y *= ACC_CALIB_Y;
 
                 sensor_msgs::msg::Imu::SharedPtr msg_imu = std::make_shared<sensor_msgs::msg::Imu>();
                 msg_imu->header.frame_id = "imu_link";
                 msg_imu->header.stamp = rclcpp::Clock().now();
                 msg_imu->orientation = imu_orientation;
+                msg_imu->orientation_covariance =  boost::assign::list_of(0.01) (0) (0)
+                                                                        (0) (0.01)  (0)
+                                                                        (0)  (0)  (0.01);
                 msg_imu->angular_velocity = imu_angular_velocity;
+                msg_imu->angular_velocity_covariance =  boost::assign::list_of(0.03) (0) (0)
+                                                                            (0) (0.03)  (0)
+                                                                            (0)  (0)  (0.03);
                 msg_imu->linear_acceleration = imu_linear_acceleration;
-                pub_imu->publish(*msg_imu);
+                msg_imu->linear_acceleration_covariance =  boost::assign::list_of(10) (0) (0)
+                                                                                (0) (10)  (0)
+                                                                                (0)  (0)  (10);
+                if (calibration_cnt > CALIBRATION_FRAMES)
+                {
+                    pub_imu->publish(*msg_imu);
+                }
+
+                /*
+                sensor_msgs::msg::MagneticField::SharedPtr msg_mag = std::make_shared<sensor_msgs::msg::MagneticField>();
+                msg_imu->header.frame_id = "imu_link";
+                msg_imu->header.stamp = rclcpp::Clock().now();
+                msg_mag->magnetic_field.x = (double)imu_data->mx;
+                msg_mag->magnetic_field.y = (double)imu_data->my;
+                msg_mag->magnetic_field.z = (double)imu_data->mz;
+                msg_mag->magnetic_field_covariance =  boost::assign::list_of(10) (0) (0)
+                                                                            (0) (10)  (0)
+                                                                            (0)  (0)  (10);
+                pub_mag->publish(*msg_mag);
+                */
             }
         }
 
@@ -298,14 +369,27 @@ nav_msgs::msg::Odometry BobikBridge::calculate_odom(std::vector<int16_t> *data) 
     nav_msgs::msg::Odometry message;
     message.header.frame_id = "odom";
     message.child_frame_id = "base_link";
-    message.header.stamp = rclcpp::Clock().now();
+    rclcpp::Duration delay = rclcpp::Duration(0, MSG_TRANSPORT_DELAY_MS * 1000000);
+    message.header.stamp = rclcpp::Clock().now();// - delay;
     message.pose.pose = odom_pose;
+    // message.pose.covariance =  boost::assign::list_of(1e-3) (0)    (0)  (0)  (0)  (0)
+                                                    //    (0) (1e-3)  (0)  (0)  (0)  (0)
+                                                    //    (0)   (0)  (1e6) (0)  (0)  (0)
+                                                    //    (0)   (0)   (0) (1e6) (0)  (0)
+                                                    //    (0)   (0)   (0)  (0) (1e6) (0)
+                                                    //    (0)   (0)   (0)  (0)  (0)  (1e3) ;
     message.twist.twist.linear.x = base_center_x;
     message.twist.twist.linear.y = base_center_y;
     message.twist.twist.linear.z = 0;
     message.twist.twist.angular.x = 0;
     message.twist.twist.angular.y = 0;
     message.twist.twist.angular.z = base_twist_rotation;
+    // message.twist.covariance =  boost::assign::list_of(1e-3) (0)    (0)  (0)  (0)  (0)
+                                                    //    (0) (1e-3)  (0)  (0)  (0)  (0)
+                                                    //    (0)   (0)  (1e6) (0)  (0)  (0)
+                                                    //    (0)   (0)   (0) (1e6) (0)  (0)
+                                                    //    (0)   (0)   (0)  (0) (1e6) (0)
+                                                    //    (0)   (0)   (0)  (0)  (0)  (1e3) ;
     return message;
 }
 

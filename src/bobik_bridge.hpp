@@ -30,6 +30,7 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom;
     rclcpp::Publisher<sensor_msgs::msg::LaserScan>::SharedPtr pub_scan;
     rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr pub_imu;
+    rclcpp::Publisher<sensor_msgs::msg::MagneticField>::SharedPtr pub_mag;
 
     /**
      * @brief Keep track of drive ticks to accumulate
